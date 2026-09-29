@@ -1,54 +1,117 @@
-from langchain_ollama import OllamaEmbeddings, ChatOllama
+import re
+
+import kuzu
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
-import kuzu
+from langchain_ollama import ChatOllama, OllamaEmbeddings
+
 
 class QuestionRouter:
-    # คำหลักเชิงโครงสร้าง สำหรับส่งไป Graph DB
-    GRAPH_KEYWORDS = ["calls", "called by", "imports", "depends on", "impact", "affects", "who calls", "what calls"]
+    # คำเชิงโครงสร้าง -> Graph DB (ใช้ word boundary กัน "recalls" ฯลฯ, มีคำไทยด้วย)
+    GRAPH_REGEX = re.compile(
+        r"\b(calls?|called by|callers?|callees?|imports?|imported by|depends? on|"
+        r"dependenc(?:y|ies)|impact|affects?)\b|เรียกใช้|ใครเรียก|ผลกระทบ|พึ่งพา|นำเข้า",
+        re.IGNORECASE,
+    )
 
     def classify(self, question: str) -> str:
-        q_lower = question.lower()
-        if any(kw in q_lower for kw in self.GRAPH_KEYWORDS):
-            return "graph"
-        return "vector"
+        return "graph" if self.GRAPH_REGEX.search(question) else "vector"
+
 
 class HybridRAG:
     def __init__(self, vectorstore_path: str = "vector_db", graph_db_path: str = "graph_db"):
         self.embeddings = OllamaEmbeddings(model="nomic-embed-text")
-        self.vectorstore = FAISS.load_local(vectorstore_path, self.embeddings, allow_dangerous_deserialization=True)
-        self.db = kuzu.Database(graph_db_path)
+        self.vectorstore = FAISS.load_local(
+            vectorstore_path, self.embeddings, allow_dangerous_deserialization=True
+        )  # โอเคเพราะเป็น index ที่เราสร้างเอง
+        self.db = kuzu.Database(graph_db_path, read_only=True)
         self.conn = kuzu.Connection(self.db)
         self.llm = ChatOllama(model="qwen2.5-coder:7b", temperature=0.0)
         self.router = QuestionRouter()
 
-    def _vector_query(self, question: str) -> dict:
-        docs = self.vectorstore.similarity_search(question, k=5)
-        context = "\n\n".join([f"# {d.metadata['function']} in {d.metadata['file']}\n{d.page_content}" for d in docs])
-        
+        # โหลดรายชื่อฟังก์ชัน/โมดูลไว้จับคู่กับคำถาม
+        self.functions = [(n, q) for n, q in self._rows("MATCH (f:Function) RETURN f.name, f.qualname")]
+        self.modules = [r[0] for r in self._rows("MATCH (m:Module) RETURN m.name")]
+
+    # ---------- helpers ----------
+    def _rows(self, query: str, params: dict | None = None) -> list:
+        result = self.conn.execute(query, params) if params else self.conn.execute(query)
+        rows = []
+        while result.has_next():
+            rows.append(result.get_next())
+        return rows
+
+    def _find_targets(self, question: str):
+        tokens = {t.rstrip(".") for t in re.findall(r"[A-Za-z_][\w.]*", question)}
+        funcs = [n for n, q in self.functions if q in tokens or q.split(".")[-1] in tokens][:10]
+        mods = [m for m in self.modules if m in tokens or m.split(".")[-1] in tokens][:10]
+        return funcs, mods
+
+    def _graph_context(self, question: str) -> list[str] | None:
+        """คืนรายการความสัมพันธ์ที่เกี่ยวกับสิ่งที่ถูกถามถึง หรือ None ถ้าจับชื่อไม่ได้เลย"""
+        q = question.lower()
+        funcs, mods = self._find_targets(question)
+
+        if mods and re.search(r"import|depend|นำเข้า|พึ่งพา", q):
+            rows = self._rows(
+                "MATCH (a:Module)-[:IMPORTS]->(b:Module) "
+                "WHERE a.name IN $t OR b.name IN $t RETURN a.name, b.name LIMIT 100",
+                {"t": mods},
+            )
+            lines = [f"{a} imports {b}" for a, b in rows]
+            targets = mods
+        elif funcs:
+            if re.search(r"impact|affect|ผลกระทบ", q):
+                rows = self._rows(
+                    "MATCH (a:Function)-[:CALLS*1..3]->(b:Function) "
+                    "WHERE b.name IN $t RETURN DISTINCT a.name, b.name LIMIT 100",
+                    {"t": funcs},
+                )
+                lines = [f"{a} depends (directly or indirectly) on {b}" for a, b in rows]
+            else:
+                rows = self._rows(
+                    "MATCH (a:Function)-[:CALLS]->(b:Function) "
+                    "WHERE a.name IN $t OR b.name IN $t RETURN a.name, b.name LIMIT 100",
+                    {"t": funcs},
+                )
+                lines = [f"{a} calls {b}" for a, b in rows]
+            targets = funcs
+        else:
+            return None
+
+        if not lines:
+            lines = [f"No relationships found in the graph for: {', '.join(targets)}"]
+        return lines
+
+    def _answer(self, question: str, graph_lines: list[str] | None) -> dict:
+        docs = self.vectorstore.similarity_search(question, k=3 if graph_lines else 5)
+        code_ctx = "\n\n".join(
+            f"# {d.metadata['function']} in {d.metadata['file']}\n{d.page_content}" for d in docs
+        )
+        parts = []
+        if graph_lines:
+            parts.append("Graph relationships:\n" + "\n".join(graph_lines))
+        parts.append("Code:\n" + code_ctx)
+        context = "\n\n".join(parts)
+
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a coding assistant. Answer using ONLY this code context:\n\n{context}"),
-            ("human", "{question}")
+            ("system",
+             "You are a coding assistant. Answer using ONLY the context below. "
+             "If the context is not enough, say you cannot find it in the codebase. "
+             "Reply in the same language as the question.\n\n{context}"),
+            ("human", "{question}"),
         ])
         answer = (prompt | self.llm).invoke({"context": context, "question": question})
-        
-        return {"answer": answer.content, "source": "vector", "docs": [d.metadata for d in docs]}
+        return {
+            "answer": answer.content,
+            "source": "graph" if graph_lines else "vector",
+            "docs": [d.metadata for d in docs],
+            "graph_rows": graph_lines or [],
+        }
 
-    def _graph_query(self, question: str) -> dict:
-        # สมมติฐานง่ายๆ ดึงฟังก์ชันทั้งหมดมาให้ LLM วิเคราะห์โครงสร้าง
-        result = self.conn.execute("MATCH (a:Function)-[:CALLS]->(b:Function) RETURN a.name AS caller, b.name AS callee LIMIT 50")
-        df = result.get_as_df()
-        context = f"Call Graph Relationships:\n{df.to_string()}"
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "Answer the code structure question using ONLY the provided graph data.\n\nGraph data:\n{context}"),
-            ("human", "{question}")
-        ])
-        answer = (prompt | self.llm).invoke({"context": context, "question": question})
-        return {"answer": answer.content, "source": "graph", "docs": []}
-
+    # ---------- public ----------
     def query(self, question: str) -> dict:
-        route = self.router.classify(question)
-        if route == "graph":
-            return self._graph_query(question)
-        return self._vector_query(question)
+        graph_lines = None
+        if self.router.classify(question) == "graph":
+            graph_lines = self._graph_context(question)  # None = จับชื่อไม่ได้ -> fallback ไป vector
+        return self._answer(question, graph_lines)
