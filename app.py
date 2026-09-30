@@ -33,7 +33,7 @@ def render_extras(mode, sources, graph_rows):
             for src in sources:
                 st.code(
                     f"File: {src.get('file', '?')}\n"
-                    f"Function: {src.get('function', '?')} (line {src.get('line', '?')})"
+                    f"{src.get('kind', 'function').capitalize()}: {src.get('function', '?')} (line {src.get('line', '?')})"
                 )
 
 

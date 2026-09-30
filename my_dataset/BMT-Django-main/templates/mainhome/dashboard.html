@@ -1,0 +1,71 @@
+{% load tailwind_tags %}
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <title>รายการสนามแบดมินตัน</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  {% tailwind_css %}
+</head>
+<body class="min-h-screen bg-gray-50">
+  <!-- Header -->
+  <header class="bg-white border-b">
+    <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+      <h1 class="text-xl md:text-2xl font-bold text-indigo-700">ระบบจองสนามแบดมินตัน 🏸</h1>
+      <div class="flex items-center gap-3">
+        <span class="hidden sm:inline text-gray-700">สวัสดี, {{ user.get_full_name|default:user.username }}</span>
+          <!-- ปุ่มดูโปรไฟล์ -->
+        <a href="{% url 'profile' %}"
+           class="rounded-lg bg-blue-500 text-white px-3 py-2 text-sm hover:bg-blue-600 transition">
+          โปรไฟล์
+        </a>
+        <a href="{% url 'booking_history' %}"
+           class="rounded-lg bg-green-500 text-white px-3 py-2 text-sm hover:bg-green-600 transition">
+          ประวัติการจอง
+        </a>
+        <form method="post" action="{% url 'logout' %}">
+          {% csrf_token %}
+          <button type="submit" class="rounded-lg bg-red-500 text-white px-3 py-2 text-sm hover:bg-red-600 transition">
+            ออกจากระบบ
+          </button>
+        </form>
+      </div>
+    </div>
+  </header>
+
+  <!-- Content -->
+  <main class="max-w-6xl mx-auto px-4 py-6">
+    {% if courts %}
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        {% for court in courts %}
+          <article class="bg-white rounded-2xl shadow border overflow-hidden hover:shadow-md transition">
+            {% if court.image %}
+              <img src="{{ court.image.url }}" alt="{{ court.name }}" class="w-full h-56 object-cover">
+            {% else %}
+              <div class="w-full h-56 bg-gray-100 grid place-items-center text-gray-500">ไม่มีรูปภาพ</div>
+            {% endif %}
+            <div class="p-4">
+              <div class="flex items-start justify-between">
+                <h2 class="text-lg font-bold text-gray-900">{{ court.name }}</h2>
+                {% if court.available %}
+                  <span class="inline-flex items-center rounded-full bg-emerald-50 text-emerald-700 text-xs font-semibold px-2 py-1 border border-emerald-200">ว่าง</span>
+                {% else %}
+                  <span class="inline-flex items-center rounded-full bg-gray-100 text-gray-700 text-xs font-semibold px-2 py-1 border border-gray-200">ไม่ว่าง</span>
+                {% endif %}
+              </div>
+              <div class="mt-4">
+                <a href="{% url 'court_detail' court.id %}"
+                   class="inline-flex items-center justify-center rounded-lg bg-indigo-600 text-white px-4 py-2 hover:bg-indigo-700 transition">
+                  ดูรอบเวลา / จอง
+                </a>
+              </div>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="bg-white border rounded-xl p-8 text-center text-gray-600 shadow">ยังไม่มีรายการสนาม</div>
+    {% endif %}
+  </main>
+</body>
+</html>

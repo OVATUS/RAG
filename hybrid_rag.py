@@ -6,16 +6,28 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 
+URL_FRAG = re.compile(r"(?:^|\s)(/[\w\-]+(?:/[\w\-<>:]*)*)")
+
+
+def _route_regex(route: str) -> str:
+    """แปลง /bookings/<int:pk>/delete/ เป็น regex ที่จับ /bookings/1/delete/ ได้"""
+    parts = re.split(r"(<[^>]+>)", route.rstrip("/"))
+    return "".join("[^/]+" if p.startswith("<") else re.escape(p) for p in parts)
+
+
 class QuestionRouter:
     # คำเชิงโครงสร้าง -> Graph DB (ใช้ word boundary กัน "recalls" ฯลฯ, มีคำไทยด้วย)
     GRAPH_REGEX = re.compile(
         r"\b(calls?|called by|callers?|callees?|imports?|imported by|depends? on|"
-        r"dependenc(?:y|ies)|impact|affects?)\b|เรียกใช้|ใครเรียก|ผลกระทบ|พึ่งพา|นำเข้า",
+        r"dependenc(?:y|ies)|impact|affects?|urls?|routes?|endpoints?)\b|"
+        r"เรียกใช้|ใครเรียก|ผลกระทบ|พึ่งพา|นำเข้า|เส้นทาง|ลิงก์",
         re.IGNORECASE,
     )
 
     def classify(self, question: str) -> str:
-        return "graph" if self.GRAPH_REGEX.search(question) else "vector"
+        if self.GRAPH_REGEX.search(question) or URL_FRAG.search(question):
+            return "graph"
+        return "vector"
 
 
 class HybridRAG:
@@ -32,6 +44,7 @@ class HybridRAG:
         # โหลดรายชื่อฟังก์ชัน/โมดูลไว้จับคู่กับคำถาม
         self.functions = [(n, q) for n, q in self._rows("MATCH (f:Function) RETURN f.name, f.qualname")]
         self.modules = [r[0] for r in self._rows("MATCH (m:Module) RETURN m.name")]
+        self.routes = self._rows("MATCH (r:Route)-[:ROUTES_TO]->(f:Function) RETURN r.name, f.name")
 
     # ---------- helpers ----------
     def _rows(self, query: str, params: dict | None = None) -> list:
@@ -43,16 +56,34 @@ class HybridRAG:
 
     def _find_targets(self, question: str):
         tokens = {t.rstrip(".") for t in re.findall(r"[A-Za-z_][\w.]*", question)}
-        funcs = [n for n, q in self.functions if q in tokens or q.split(".")[-1] in tokens][:10]
+        funcs = [n for n, q in self.functions
+                 if q in tokens or q.split(".")[-1] in tokens
+                 or (q.endswith(".__init__") and q[: -len(".__init__")] in tokens)][:10]
         mods = [m for m in self.modules if m in tokens or m.split(".")[-1] in tokens][:10]
         return funcs, mods
+
+    def _match_routes(self, frag: str) -> list:
+        path = frag.rstrip("/")
+        hit = [(r, f) for r, f in self.routes if re.fullmatch(_route_regex(r), path)]
+        return hit or [(r, f) for r, f in self.routes if path.strip("/") in r]
 
     def _graph_context(self, question: str) -> list[str] | None:
         """คืนรายการความสัมพันธ์ที่เกี่ยวกับสิ่งที่ถูกถามถึง หรือ None ถ้าจับชื่อไม่ได้เลย"""
         q = question.lower()
         funcs, mods = self._find_targets(question)
 
-        if mods and re.search(r"import|depend|นำเข้า|พึ่งพา", q):
+        url_frags = [m.strip() for m in URL_FRAG.findall(question)]
+        if url_frags or (re.search(r"\burls?\b|\broutes?\b|endpoint|เส้นทาง|ลิงก์", q) and funcs):
+            lines = []
+            if funcs:
+                rows = self._rows(
+                    "MATCH (r:Route)-[:ROUTES_TO]->(f:Function) WHERE f.name IN $t "
+                    "RETURN r.name, f.name LIMIT 50", {"t": funcs})
+                lines += [f"URL {r} is handled by view {f}" for r, f in rows]
+            for frag in url_frags[:3]:
+                lines += [f"URL {r} is handled by view {f}" for r, f in self._match_routes(frag)]
+            targets = funcs + url_frags
+        elif mods and re.search(r"import|depend|นำเข้า|พึ่งพา", q):
             rows = self._rows(
                 "MATCH (a:Module)-[:IMPORTS]->(b:Module) "
                 "WHERE a.name IN $t OR b.name IN $t RETURN a.name, b.name LIMIT 100",
@@ -86,7 +117,8 @@ class HybridRAG:
     def _answer(self, question: str, graph_lines: list[str] | None) -> dict:
         docs = self.vectorstore.similarity_search(question, k=3 if graph_lines else 5)
         code_ctx = "\n\n".join(
-            f"# {d.metadata['function']} in {d.metadata['file']}\n{d.page_content}" for d in docs
+            f"# {d.metadata.get('kind', 'code')} {d.metadata['function']} in {d.metadata['file']}\n{d.page_content}"
+            for d in docs
         )
         parts = []
         if graph_lines:

@@ -1,0 +1,69 @@
+{# templates/register.html #}
+{% load tailwind_tags %}
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>สมัครสมาชิก</title>
+  {% tailwind_css %}
+</head>
+<body class="bg-gray-50 min-h-screen grid place-items-center">
+  <main class="w-full max-w-md bg-white shadow-xl rounded-2xl p-8">
+    <h1 class="text-2xl font-bold">สมัครสมาชิก</h1>
+    <p class="text-gray-600 mt-1">กรอกข้อมูลให้ครบถ้วน</p>
+
+    <form method="post" class="mt-6 space-y-5" novalidate>
+      {% csrf_token %}
+
+      <div>
+        <label class="block text-sm font-medium">ชื่อผู้ใช้ *</label>
+        {{ form.username.errors }}
+        <input type="text" name="{{ form.username.html_name }}" value="{{ form.username.value|default:'' }}"
+               class="mt-1 block w-full rounded-lg border-gray-300 focus:border-indigo-500 focus:ring-indigo-500" required>
+        {% if form.username.help_text %}<p class="text-xs text-gray-500 mt-1">{{ form.username.help_text }}</p>{% endif %}
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium">อีเมล *</label>
+        {{ form.email.errors }}
+        <input type="email" name="{{ form.email.html_name }}" value="{{ form.email.value|default:'' }}"
+               class="mt-1 block w-full rounded-lg border-gray-300 focus:border-indigo-500 focus:ring-indigo-500" required>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium">เบอร์โทร *</label>
+        {{ form.phone.errors }}
+        <input type="text" name="{{ form.phone.html_name }}" value="{{ form.phone.value|default:'' }}"
+               class="mt-1 block w-full rounded-lg border-gray-300 focus:border-indigo-500 focus:ring-indigo-500" placeholder="" required>
+        {% if form.phone.help_text %}<p class="text-xs text-gray-500 mt-1">{{ form.phone.help_text }}</p>{% endif %}
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium">รหัสผ่าน *</label>
+        {{ form.password1.errors }}
+        <input type="password" name="{{ form.password1.html_name }}"
+               class="mt-1 block w-full rounded-lg border-gray-300 focus:border-indigo-500 focus:ring-indigo-500" required>
+        {% if form.password1.help_text %}<div class="text-xs text-gray-500 mt-1">{{ form.password1.help_text|safe }}</div>{% endif %}
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium">ยืนยันรหัสผ่าน *</label>
+        {{ form.password2.errors }}
+        <input type="password" name="{{ form.password2.html_name }}"
+               class="mt-1 block w-full rounded-lg border-gray-300 focus:border-indigo-500 focus:ring-indigo-500" required>
+      </div>
+
+      <button type="submit"
+              class="w-full rounded-lg bg-emerald-600 text-white font-medium px-4 py-2.5 hover:bg-emerald-700 transition">
+        สมัครสมาชิก
+      </button>
+    </form>
+
+    <p class="mt-6 text-center text-sm text-gray-600">
+      มีบัญชีอยู่แล้ว?
+      <a href="{% url 'login' %}" class="text-indigo-600 hover:text-indigo-700">เข้าสู่ระบบ</a>
+    </p>
+  </main>
+</body>
+</html>
